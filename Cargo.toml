@@ -1,0 +1,21 @@
+[package]
+name = "ws2tcp-local-ffi"
+version = "0.1.0"
+edition = "2024"
+description = "C ABI adapter for ws2tcp-local."
+license = "MIT"
+repository = "https://github.com/uglykitty/ws2tcp-local-ffi"
+publish = false
+
+[lib]
+name = "ws2tcp_local_ffi"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.45", features = ["rt-multi-thread", "sync"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
+ws2tcp-local-core = { version = "0.1.0", path = "../ws2tcp-local-core" }
