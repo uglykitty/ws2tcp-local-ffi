@@ -1,6 +1,6 @@
 [package]
 name = "ws2tcp-local-ffi"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "C ABI adapter for ws2tcp-local."
 license = "MIT"
@@ -17,4 +17,4 @@ serde_json = "1.0"
 tokio = { version = "1.45", features = ["rt-multi-thread", "sync"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
-ws2tcp-local-core = { version = "0.1.0", path = "../ws2tcp-local-core" }
+ws2tcp-local-core = { version = "0.1.1", path = "../ws2tcp-local-core" }
