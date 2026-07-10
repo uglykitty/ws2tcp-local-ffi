@@ -14,7 +14,7 @@ use tracing_subscriber::{
 };
 use ws2tcp_local_core::{
     DEFAULT_BUFFER_SIZE, DEFAULT_LISTEN, DEFAULT_RULE_REFRESH_INTERVAL_SECS, ProxyMode, Settings,
-    run_proxy,
+    run_proxy_with_mode_updates,
 };
 
 #[repr(C)]
@@ -44,6 +44,7 @@ static LOGGING_INIT: Once = Once::new();
 struct State {
     task: Option<tokio::task::JoinHandle<Result<(), String>>>,
     shutdown: Option<oneshot::Sender<()>>,
+    mode_updates: Option<tokio::sync::mpsc::UnboundedSender<ProxyMode>>,
     last_error: CString,
 }
 
@@ -68,6 +69,7 @@ pub extern "C" fn ws2tcp_handle_new() -> *mut Ws2TcpHandle {
             state: Mutex::new(State {
                 task: None,
                 shutdown: None,
+                mode_updates: None,
                 last_error: empty_c_string(),
             }),
         })),
@@ -160,6 +162,36 @@ pub unsafe extern "C" fn ws2tcp_stop(handle: *mut Ws2TcpHandle) -> i32 {
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn ws2tcp_set_proxy_mode(
+    handle: *mut Ws2TcpHandle,
+    proxy_mode: *const c_char,
+) -> i32 {
+    let handle = match unsafe { handle.as_mut() } {
+        Some(handle) => handle,
+        None => return WS2TCP_ERROR_NULL_HANDLE,
+    };
+    let result = required_c_str(proxy_mode)
+        .and_then(|value| parse_proxy_mode(&value))
+        .and_then(|mode| {
+            let state = lock_state(handle);
+            let sender = state
+                .mode_updates
+                .as_ref()
+                .context("proxy is not running")?;
+            sender
+                .send(mode)
+                .context("proxy mode update channel is closed")
+        });
+    match result {
+        Ok(()) => WS2TCP_OK,
+        Err(err) => {
+            set_last_error(handle, err);
+            WS2TCP_ERROR_RUNTIME
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn ws2tcp_status(handle: *mut Ws2TcpHandle) -> Ws2TcpStatus {
     let handle = match unsafe { handle.as_mut() } {
         Some(handle) => handle,
@@ -206,10 +238,15 @@ fn start_handle(handle: &mut Ws2TcpHandle, config_json: *const c_char) -> Result
     }
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let (mode_updates_tx, mode_updates_rx) = tokio::sync::mpsc::unbounded_channel();
     let task = handle.runtime.spawn(async move {
-        let result = run_proxy(settings, async {
-            let _ = shutdown_rx.await;
-        })
+        let result = run_proxy_with_mode_updates(
+            settings,
+            async {
+                let _ = shutdown_rx.await;
+            },
+            mode_updates_rx,
+        )
         .await
         .map_err(|err| format!("{err:#}"));
         match &result {
@@ -220,6 +257,7 @@ fn start_handle(handle: &mut Ws2TcpHandle, config_json: *const c_char) -> Result
     });
 
     state.shutdown = Some(shutdown_tx);
+    state.mode_updates = Some(mode_updates_tx);
     state.task = Some(task);
     state.last_error = empty_c_string();
     Ok(())
@@ -232,6 +270,7 @@ fn stop_handle(handle: &mut Ws2TcpHandle) -> Result<()> {
             emit_log("stopping proxy");
             let _ = shutdown.send(());
         }
+        state.mode_updates = None;
         state.task.take()
     };
 
@@ -254,6 +293,7 @@ fn reap_finished_task(handle: &Ws2TcpHandle, state: &mut State) {
 
     if let Some(task) = state.task.take() {
         state.shutdown = None;
+        state.mode_updates = None;
         match handle.runtime.block_on(task) {
             Ok(Ok(())) => {}
             Ok(Err(err)) => state.last_error = c_string_lossy(err),
@@ -297,6 +337,11 @@ fn parse_settings(json: &str) -> Result<Settings> {
         proxy_mode: settings.proxy_mode.unwrap_or(ProxyMode::Global),
         verify_server_certificate: settings.verify_server_certificate.unwrap_or(false),
     })
+}
+
+fn parse_proxy_mode(value: &str) -> Result<ProxyMode> {
+    serde_json::from_value(serde_json::Value::String(value.to_owned()))
+        .context("proxy_mode must be global or auto")
 }
 
 fn lock_state(handle: &Ws2TcpHandle) -> std::sync::MutexGuard<'_, State> {
@@ -493,6 +538,10 @@ mod tests {
             unsafe { ws2tcp_status(handle) },
             Ws2TcpStatus::Running
         ));
+        assert_eq!(
+            unsafe { ws2tcp_set_proxy_mode(handle, c"global".as_ptr()) },
+            WS2TCP_OK
+        );
         assert_eq!(unsafe { ws2tcp_stop(handle) }, WS2TCP_OK);
         assert!(matches!(
             unsafe { ws2tcp_status(handle) },

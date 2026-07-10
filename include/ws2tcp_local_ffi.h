@@ -29,6 +29,7 @@ int ws2tcp_set_log_callback(Ws2TcpLogCallback callback, void *user_data,
                             const char *log_level);
 
 int ws2tcp_start(Ws2TcpHandle *handle, const char *config_json);
+int ws2tcp_set_proxy_mode(Ws2TcpHandle *handle, const char *proxy_mode);
 int ws2tcp_stop(Ws2TcpHandle *handle);
 Ws2TcpStatus ws2tcp_status(Ws2TcpHandle *handle);
 const char *ws2tcp_last_error(Ws2TcpHandle *handle);
