@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.2 - 2026-07-14
+
+### Changed
+
+- Updated `ws2tcp-local-core` to 0.1.2 so automatic routing falls back to an
+  in-memory gfwlist cache when the platform disk cache is unavailable.
+
 ## 0.1.5 - 2026-07-08
 
 ### Changed
