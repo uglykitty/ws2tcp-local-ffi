@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.3 - 2026-08-24
+
+### Changed
+
+- Replaced the JSON `verify_server_certificate` setting with `insecure`.
+- Updated `ws2tcp-local-core` to 0.1.3 and enabled TLS server certificate
+  verification by default.
+
 ## 0.1.2 - 2026-07-14
 
 ### Changed

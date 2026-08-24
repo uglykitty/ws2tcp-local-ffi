@@ -58,7 +58,7 @@ struct FfiSettings {
     custom_domain_rules: Option<PathBuf>,
     rule_refresh_interval_secs: Option<u64>,
     proxy_mode: Option<ProxyMode>,
-    verify_server_certificate: Option<bool>,
+    insecure: Option<bool>,
 }
 
 #[unsafe(no_mangle)]
@@ -335,7 +335,7 @@ fn parse_settings(json: &str) -> Result<Settings> {
         custom_domain_rules: settings.custom_domain_rules,
         rule_refresh_interval: Duration::from_secs(rule_refresh_interval_secs),
         proxy_mode: settings.proxy_mode.unwrap_or(ProxyMode::Global),
-        verify_server_certificate: settings.verify_server_certificate.unwrap_or(false),
+        insecure: settings.insecure.unwrap_or(false),
     })
 }
 
@@ -497,7 +497,7 @@ mod tests {
         assert_eq!(settings.gateway, "ws://127.0.0.1:8000");
         assert_eq!(settings.buffer_size, DEFAULT_BUFFER_SIZE);
         assert_eq!(settings.proxy_mode, ProxyMode::Global);
-        assert!(!settings.verify_server_certificate);
+        assert!(!settings.insecure);
     }
 
     #[test]
