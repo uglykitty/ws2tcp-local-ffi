@@ -24,7 +24,6 @@ enum {
 Ws2TcpHandle *ws2tcp_handle_new(void);
 void ws2tcp_handle_free(Ws2TcpHandle *handle);
 
-int ws2tcp_init_logging(const char *log_level);
 int ws2tcp_set_log_callback(Ws2TcpLogCallback callback, void *user_data,
                             const char *log_level);
 

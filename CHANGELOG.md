@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.5 - 2026-09-07
+
+### Removed
+
+- Removed `ws2tcp_init_logging`, the stdout/fmt-based logging entry point.
+  It raced with `ws2tcp_set_log_callback`'s callback-based subscriber for
+  `tracing`'s process-global dispatcher, and no frontend (the Qt GUI included)
+  called it. Use `ws2tcp_set_log_callback` to receive log lines.
+
+### Changed
+
+- Updated `ws2tcp-local-core` to 0.1.5.
+
 ## 0.1.4 - 2026-09-05
 
 ### Changed

@@ -88,19 +88,6 @@ pub unsafe extern "C" fn ws2tcp_handle_free(handle: *mut Ws2TcpHandle) {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ws2tcp_init_logging(log_level: *const c_char) -> i32 {
-    let log_level = match optional_c_str(log_level) {
-        Ok(value) => value,
-        Err(err) => return ffi_error_without_handle(err),
-    };
-
-    match ws2tcp_local_core::init_logging(log_level.as_deref()) {
-        Ok(()) => WS2TCP_OK,
-        Err(err) => ffi_error_without_handle(err),
-    }
-}
-
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn ws2tcp_set_log_callback(
     callback: Option<LogCallback>,
     user_data: *mut std::ffi::c_void,
