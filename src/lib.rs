@@ -51,6 +51,7 @@ struct State {
 #[derive(Debug, Deserialize)]
 struct FfiSettings {
     listen: Option<std::net::SocketAddr>,
+    socks_listen: Option<std::net::SocketAddr>,
     gateway: String,
     basic_auth: Option<String>,
     buffer_size: Option<usize>,
@@ -315,6 +316,7 @@ fn parse_settings(json: &str) -> Result<Settings> {
                 .parse()
                 .context("invalid default listen address")?,
         ),
+        socks_listen: settings.socks_listen,
         gateway: settings.gateway,
         basic_auth: settings.basic_auth,
         buffer_size,
