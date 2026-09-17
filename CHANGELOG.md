@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.1.6 - 2026-09-17
+
+### Added
+
+- `FfiSettings` accepts an optional `client_label` field in `config_json`,
+  identifying the embedding frontend (e.g. `ws2tcp-local-qt/0.3.2`) in the
+  `User-Agent` sent with gfwlist HTTP requests. Defaults to
+  `ws2tcp-local-ffi/0.1.6` when the caller does not set one.
+- Passed through the optional `socks_listen` setting, keeping
+  `FfiSettings`/`Settings` in sync with `ws2tcp-local-core`'s local SOCKS5
+  (socks5h) listener so FFI callers can enable it via `config_json`.
+
+### Changed
+
+- Updated `ws2tcp-local-core` to 0.1.7.
+
 ## 0.1.5 - 2026-09-07
 
 ### Removed

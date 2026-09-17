@@ -60,6 +60,10 @@ struct FfiSettings {
     rule_refresh_interval_secs: Option<u64>,
     proxy_mode: Option<ProxyMode>,
     insecure: Option<bool>,
+    /// Identifies the embedding frontend (e.g. "ws2tcp-local-qt/0.3.1") for the
+    /// User-Agent sent on outbound HTTP requests such as gfwlist downloads.
+    /// Falls back to an ffi-only identity when the caller does not set it.
+    client_label: Option<String>,
 }
 
 #[unsafe(no_mangle)]
@@ -325,6 +329,9 @@ fn parse_settings(json: &str) -> Result<Settings> {
         rule_refresh_interval: Duration::from_secs(rule_refresh_interval_secs),
         proxy_mode: settings.proxy_mode.unwrap_or(ProxyMode::Global),
         insecure: settings.insecure.unwrap_or(false),
+        client_label: Some(settings.client_label.unwrap_or_else(|| {
+            format!("ws2tcp-local-ffi/{}", env!("CARGO_PKG_VERSION"))
+        })),
     })
 }
 
