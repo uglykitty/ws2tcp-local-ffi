@@ -13,14 +13,58 @@ use tracing_subscriber::{
     EnvFilter, Layer, Registry, layer::Context as LayerContext, prelude::*, registry::LookupSpan,
 };
 use ws2tcp_local_core::{
-    DEFAULT_BUFFER_SIZE, DEFAULT_LISTEN, DEFAULT_RULE_REFRESH_INTERVAL_SECS, ProxyMode, Settings,
-    run_proxy_with_mode_updates,
+    DEFAULT_BUFFER_SIZE, DEFAULT_LISTEN, DEFAULT_RULE_REFRESH_INTERVAL_SECS, GatewayCheckError,
+    ProxyMode, Settings, run_proxy_with_mode_updates,
 };
 
 #[repr(C)]
 pub enum Ws2TcpStatus {
     Stopped = 0,
     Running = 1,
+}
+
+/// What kind of failure `ws2tcp_last_error` describes.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ws2TcpErrorKind {
+    /// No error.
+    None = 0,
+    /// Any other error.
+    Other = 1,
+    /// The gateway rejected the Basic Auth credentials (or needs them and none were given).
+    AuthFailed = 2,
+    /// The startup check of the gateway failed for another reason: it is unreachable, timed out,
+    /// or is not a `ws2tcp-router` with the health check.
+    GatewayCheckFailed = 3,
+}
+
+/// Why the proxy task ended with an error.
+#[derive(Debug)]
+struct TaskError {
+    kind: Ws2TcpErrorKind,
+    message: String,
+}
+
+impl std::fmt::Display for TaskError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for TaskError {}
+
+impl From<anyhow::Error> for TaskError {
+    fn from(err: anyhow::Error) -> Self {
+        let kind = match err.downcast_ref::<GatewayCheckError>() {
+            Some(GatewayCheckError::Unauthorized { .. }) => Ws2TcpErrorKind::AuthFailed,
+            Some(GatewayCheckError::Failed(_)) => Ws2TcpErrorKind::GatewayCheckFailed,
+            None => Ws2TcpErrorKind::Other,
+        };
+        Self {
+            kind,
+            message: format!("{err:#}"),
+        }
+    }
 }
 
 pub struct Ws2TcpHandle {
@@ -42,10 +86,11 @@ static LOG_CALLBACK: Mutex<LogCallbackState> = Mutex::new(LogCallbackState {
 static LOGGING_INIT: Once = Once::new();
 
 struct State {
-    task: Option<tokio::task::JoinHandle<Result<(), String>>>,
+    task: Option<tokio::task::JoinHandle<Result<(), TaskError>>>,
     shutdown: Option<oneshot::Sender<()>>,
     mode_updates: Option<tokio::sync::mpsc::UnboundedSender<ProxyMode>>,
     last_error: CString,
+    last_error_kind: Ws2TcpErrorKind,
 }
 
 #[derive(Debug, Deserialize)]
@@ -76,6 +121,7 @@ pub extern "C" fn ws2tcp_handle_new() -> *mut Ws2TcpHandle {
                 shutdown: None,
                 mode_updates: None,
                 last_error: empty_c_string(),
+                last_error_kind: Ws2TcpErrorKind::None,
             }),
         })),
         Err(_) => std::ptr::null_mut(),
@@ -124,7 +170,9 @@ pub unsafe extern "C" fn ws2tcp_start(
     };
 
     if is_running(handle) {
-        lock_state(handle).last_error = c_string_lossy("proxy is already running");
+        let mut state = lock_state(handle);
+        state.last_error = c_string_lossy("proxy is already running");
+        state.last_error_kind = Ws2TcpErrorKind::Other;
         return WS2TCP_ERROR_ALREADY_RUNNING;
     }
 
@@ -209,6 +257,16 @@ pub unsafe extern "C" fn ws2tcp_last_error(handle: *mut Ws2TcpHandle) -> *const 
     lock_state(handle).last_error.as_ptr()
 }
 
+/// The kind of the error `ws2tcp_last_error` describes. The proxy starts asynchronously, so a
+/// failed startup check of the gateway shows up here once `ws2tcp_status` reports it stopped.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ws2tcp_last_error_kind(handle: *mut Ws2TcpHandle) -> Ws2TcpErrorKind {
+    match unsafe { handle.as_mut() } {
+        Some(handle) => lock_state(handle).last_error_kind,
+        None => Ws2TcpErrorKind::Other,
+    }
+}
+
 const WS2TCP_OK: i32 = 0;
 const WS2TCP_ERROR_NULL_HANDLE: i32 = 1;
 const WS2TCP_ERROR_INVALID_ARGUMENT: i32 = 2;
@@ -240,7 +298,7 @@ fn start_handle(handle: &mut Ws2TcpHandle, config_json: *const c_char) -> Result
             mode_updates_rx,
         )
         .await
-        .map_err(|err| format!("{err:#}"));
+        .map_err(TaskError::from);
         match &result {
             Ok(()) => emit_log("proxy task stopped"),
             Err(err) => emit_log(&format!("proxy task failed: {err}")),
@@ -252,6 +310,7 @@ fn start_handle(handle: &mut Ws2TcpHandle, config_json: *const c_char) -> Result
     state.mode_updates = Some(mode_updates_tx);
     state.task = Some(task);
     state.last_error = empty_c_string();
+    state.last_error_kind = Ws2TcpErrorKind::None;
     Ok(())
 }
 
@@ -269,7 +328,7 @@ fn stop_handle(handle: &mut Ws2TcpHandle) -> Result<()> {
     if let Some(task) = task {
         match handle.runtime.block_on(task) {
             Ok(Ok(())) => {}
-            Ok(Err(err)) => bail!("{err}"),
+            Ok(Err(err)) => return Err(err.into()),
             Err(err) => bail!("proxy task join failed: {err}"),
         }
     }
@@ -288,8 +347,14 @@ fn reap_finished_task(handle: &Ws2TcpHandle, state: &mut State) {
         state.mode_updates = None;
         match handle.runtime.block_on(task) {
             Ok(Ok(())) => {}
-            Ok(Err(err)) => state.last_error = c_string_lossy(err),
-            Err(err) => state.last_error = c_string_lossy(format!("proxy task join failed: {err}")),
+            Ok(Err(err)) => {
+                state.last_error = c_string_lossy(&err.message);
+                state.last_error_kind = err.kind;
+            }
+            Err(err) => {
+                state.last_error = c_string_lossy(format!("proxy task join failed: {err}"));
+                state.last_error_kind = Ws2TcpErrorKind::Other;
+            }
         }
     }
 }
@@ -353,7 +418,12 @@ fn lock_state(handle: &Ws2TcpHandle) -> std::sync::MutexGuard<'_, State> {
 }
 
 fn set_last_error(handle: &Ws2TcpHandle, err: anyhow::Error) {
-    lock_state(handle).last_error = c_string_lossy(format!("{err:#}"));
+    let kind = err
+        .downcast_ref::<TaskError>()
+        .map_or(Ws2TcpErrorKind::Other, |task_error| task_error.kind);
+    let mut state = lock_state(handle);
+    state.last_error = c_string_lossy(format!("{err:#}"));
+    state.last_error_kind = kind;
 }
 
 fn required_c_str(ptr: *const c_char) -> Result<String> {
@@ -512,6 +582,100 @@ mod tests {
         assert!(err.to_string().contains("buffer_size"));
     }
 
+    const GOOD_AUTH: &str = "Basic YWxpY2U6c2VjcmV0"; // alice:secret
+
+    static HEALTH_CHECKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    /// Serves the ws2tcp-router health check on a random local port, on a thread of its own, and
+    /// returns its `ws://` URL. Requests without `GOOD_AUTH` get `401 Unauthorized`.
+    fn spawn_fake_gateway() -> String {
+        use futures_util::SinkExt;
+        use tokio_tungstenite::tungstenite::{
+            Message,
+            handshake::server::{ErrorResponse, Request, Response},
+            http::{HeaderValue, StatusCode},
+        };
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async move {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                loop {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    tokio::spawn(async move {
+                        #[allow(clippy::result_large_err)]
+                        let handshake = tokio_tungstenite::accept_hdr_async(
+                            stream,
+                            |request: &Request, mut response: Response| {
+                                let authorized = request
+                                    .headers()
+                                    .get("authorization")
+                                    .is_some_and(|value| value == GOOD_AUTH);
+                                if authorized {
+                                    response.headers_mut().insert(
+                                        "x-ws2tcp-token",
+                                        HeaderValue::from_static("test-token"),
+                                    );
+                                    Ok(response)
+                                } else {
+                                    let mut error = ErrorResponse::new(Some(
+                                        "authentication required".to_owned(),
+                                    ));
+                                    *error.status_mut() = StatusCode::UNAUTHORIZED;
+                                    Err(error)
+                                }
+                            },
+                        )
+                        .await;
+                        if let Ok(mut websocket) = handshake {
+                            let text = "ok: ws2tcp-router test is available";
+                            let _ = websocket.send(Message::Text(text.into())).await;
+                            HEALTH_CHECKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        }
+                    });
+                }
+            });
+        });
+
+        format!("ws://{addr}")
+    }
+
+    fn start(handle: *mut Ws2TcpHandle, gateway: &str, basic_auth: Option<&str>) -> i32 {
+        let mut config = serde_json::json!({
+            "listen": "127.0.0.1:0",
+            "gateway": gateway,
+            "proxy_mode": "global",
+        });
+        if let Some(basic_auth) = basic_auth {
+            config["basic_auth"] = basic_auth.into();
+        }
+        let config = CString::new(config.to_string()).unwrap();
+        unsafe { ws2tcp_start(handle, config.as_ptr()) }
+    }
+
+    /// Waits until the proxy task has ended (the startup check failed) and returns the error.
+    fn wait_until_stopped(handle: *mut Ws2TcpHandle) -> (Ws2TcpErrorKind, String) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while matches!(unsafe { ws2tcp_status(handle) }, Ws2TcpStatus::Running) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "proxy did not stop in time"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let message = unsafe { CStr::from_ptr(ws2tcp_last_error(handle)) }
+            .to_string_lossy()
+            .into_owned();
+        (unsafe { ws2tcp_last_error_kind(handle) }, message)
+    }
+
     #[test]
     fn ffi_start_stop_lifecycle() {
         TEST_LOGS
@@ -529,15 +693,24 @@ mod tests {
             WS2TCP_OK
         );
 
+        let gateway = spawn_fake_gateway();
+        let checks_before = HEALTH_CHECKS.load(std::sync::atomic::Ordering::SeqCst);
         let handle = ws2tcp_handle_new();
         assert!(!handle.is_null());
 
-        let config = CString::new(
-            r#"{"listen":"127.0.0.1:0","gateway":"ws://127.0.0.1:1","proxy_mode":"global"}"#,
-        )
-        .unwrap();
+        assert_eq!(start(handle, &gateway, Some("alice:secret")), WS2TCP_OK);
+        assert!(matches!(
+            unsafe { ws2tcp_status(handle) },
+            Ws2TcpStatus::Running
+        ));
 
-        assert_eq!(unsafe { ws2tcp_start(handle, config.as_ptr()) }, WS2TCP_OK);
+        // Once the gateway has answered the startup check, the proxy keeps running.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while HEALTH_CHECKS.load(std::sync::atomic::Ordering::SeqCst) == checks_before {
+            assert!(std::time::Instant::now() < deadline, "no health check");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        std::thread::sleep(Duration::from_millis(200));
         assert!(matches!(
             unsafe { ws2tcp_status(handle) },
             Ws2TcpStatus::Running
@@ -551,6 +724,10 @@ mod tests {
             unsafe { ws2tcp_status(handle) },
             Ws2TcpStatus::Stopped
         ));
+        assert_eq!(
+            unsafe { ws2tcp_last_error_kind(handle) },
+            Ws2TcpErrorKind::None
+        );
 
         unsafe { ws2tcp_handle_free(handle) };
 
@@ -559,6 +736,60 @@ mod tests {
             logs.iter()
                 .any(|line| line.contains("starting proxy listen=127.0.0.1:0")),
             "logs did not contain startup line: {logs:?}"
+        );
+    }
+
+    #[test]
+    fn wrong_credentials_stop_the_proxy_with_auth_failed() {
+        let gateway = spawn_fake_gateway();
+        let handle = ws2tcp_handle_new();
+
+        assert_eq!(start(handle, &gateway, Some("alice:wrong")), WS2TCP_OK);
+        let (kind, message) = wait_until_stopped(handle);
+
+        assert_eq!(kind, Ws2TcpErrorKind::AuthFailed);
+        assert!(
+            message.contains("rejected the Basic Auth credentials"),
+            "{message}"
+        );
+        // The failure was reported once; stopping afterwards is not an error.
+        assert_eq!(unsafe { ws2tcp_stop(handle) }, WS2TCP_OK);
+        unsafe { ws2tcp_handle_free(handle) };
+    }
+
+    #[test]
+    fn missing_credentials_stop_the_proxy_with_auth_failed() {
+        let gateway = spawn_fake_gateway();
+        let handle = ws2tcp_handle_new();
+
+        assert_eq!(start(handle, &gateway, None), WS2TCP_OK);
+        let (kind, message) = wait_until_stopped(handle);
+
+        assert_eq!(kind, Ws2TcpErrorKind::AuthFailed);
+        assert!(
+            message.contains("no credentials were configured"),
+            "{message}"
+        );
+        unsafe { ws2tcp_handle_free(handle) };
+    }
+
+    #[test]
+    fn unreachable_gateway_stops_the_proxy_with_gateway_check_failed() {
+        let handle = ws2tcp_handle_new();
+
+        assert_eq!(start(handle, "ws://127.0.0.1:1", None), WS2TCP_OK);
+        let (kind, message) = wait_until_stopped(handle);
+
+        assert_eq!(kind, Ws2TcpErrorKind::GatewayCheckFailed);
+        assert!(message.contains("health check failed"), "{message}");
+        unsafe { ws2tcp_handle_free(handle) };
+    }
+
+    #[test]
+    fn error_kind_of_a_null_handle_is_other() {
+        assert_eq!(
+            unsafe { ws2tcp_last_error_kind(std::ptr::null_mut()) },
+            Ws2TcpErrorKind::Other
         );
     }
 }

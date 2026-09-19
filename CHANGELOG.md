@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.1.8 - 2026-09-19
+
+### Added
+
+- `ws2tcp_last_error_kind` and the `Ws2TcpErrorKind` enum tell what the error
+  from `ws2tcp_last_error` is: `WS2TCP_ERROR_KIND_AUTH_FAILED` when the gateway
+  rejected the Basic Auth credentials (or needs them and none were given),
+  `WS2TCP_ERROR_KIND_GATEWAY_CHECK_FAILED` when the gateway is unreachable, times
+  out, or is not a `ws2tcp-router` with the `/` health check, and
+  `WS2TCP_ERROR_KIND_OTHER` for anything else.
+
+### Changed
+
+- The proxy now checks the gateway before serving (see `ws2tcp-local-core`
+  0.1.9). `ws2tcp_start` still returns right away, so a failed check shows up
+  as the proxy stopping: `ws2tcp_status` turns `WS2TCP_STATUS_STOPPED`, and
+  `ws2tcp_last_error` / `ws2tcp_last_error_kind` describe the failure. The
+  token the gateway returns is sent on every tunnel request next to Basic Auth.
+- Requires `ws2tcp-local-core` 0.1.9 and a `ws2tcp-router` with the `/` health
+  check (0.1.17 or later).
+
 ## 0.1.7 - 2026-09-19
 
 ### Changed
