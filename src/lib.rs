@@ -60,10 +60,10 @@ struct FfiSettings {
     rule_refresh_interval_secs: Option<u64>,
     proxy_mode: Option<ProxyMode>,
     insecure: Option<bool>,
-    /// Identifies the embedding frontend (e.g. "ws2tcp-local-qt/0.3.1") for the
-    /// User-Agent sent on outbound HTTP requests such as gfwlist downloads.
-    /// Falls back to an ffi-only identity when the caller does not set it.
-    client_label: Option<String>,
+    /// Extra headers for the gateway websocket handshake, e.g.
+    /// `{"User-Agent": "ws2tcp-local-qt/0.3.1"}`. A default `User-Agent` of
+    /// `ws2tcp-local-ffi/<version>` is sent unless overridden here.
+    headers: Option<std::collections::BTreeMap<String, String>>,
 }
 
 #[unsafe(no_mangle)]
@@ -314,7 +314,7 @@ fn parse_settings(json: &str) -> Result<Settings> {
         bail!("rule_refresh_interval_secs must be greater than 0");
     }
 
-    Ok(Settings {
+    let mut result = Settings {
         listen: settings.listen.unwrap_or(
             DEFAULT_LISTEN
                 .parse()
@@ -329,10 +329,18 @@ fn parse_settings(json: &str) -> Result<Settings> {
         rule_refresh_interval: Duration::from_secs(rule_refresh_interval_secs),
         proxy_mode: settings.proxy_mode.unwrap_or(ProxyMode::Global),
         insecure: settings.insecure.unwrap_or(false),
-        client_label: Some(settings.client_label.unwrap_or_else(|| {
-            format!("ws2tcp-local-ffi/{}", env!("CARGO_PKG_VERSION"))
-        })),
-    })
+        headers: Vec::new(),
+    };
+
+    result.add_header(
+        "User-Agent",
+        &format!("ws2tcp-local-ffi/{}", env!("CARGO_PKG_VERSION")),
+    )?;
+    for (name, value) in settings.headers.unwrap_or_default() {
+        result.add_header(&name, &value)?;
+    }
+
+    Ok(result)
 }
 
 fn parse_proxy_mode(value: &str) -> Result<ProxyMode> {

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.7 - 2026-09-19
+
+### Changed
+
+- `config_json` accepts an optional `headers` object (e.g.
+  `{"User-Agent": "ws2tcp-local-qt/0.3.3"}`) that is sent on the gateway
+  websocket handshake, replacing `client_label`. A default
+  `User-Agent: ws2tcp-local-ffi/<version>` is sent unless overridden.
+- Requires `ws2tcp-local-core` 0.1.8.
+
 ## 0.1.6 - 2026-09-17
 
 ### Added
