@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.2.0 - 2026-09-20
+
+### Added
+
+- The `config_json` accepts `auth_mode`, `"token"` (the default) or `"basic"`. `"token"` sends
+  no health check and logs in once for a short-lived access token that is renewed
+  automatically in the background; it needs credentials in `basic_auth` and a gateway with
+  token authentication, and a failed login is reported as
+  `WS2TCP_ERROR_KIND_GATEWAY_CHECK_FAILED` (or `WS2TCP_ERROR_KIND_AUTH_FAILED` for rejected
+  credentials). `"basic"`, a health check and Basic Auth on every connection, is kept for
+  compatibility and is to be phased out. Requires the matching `ws2tcp-local-core`.
+
+### Changed
+
+- **The default authentication is now `"token"`.** A gateway without token authentication
+  needs `"auth_mode": "basic"`, or startup fails with
+  `WS2TCP_ERROR_KIND_GATEWAY_CHECK_FAILED`. Frontends that embed this library and talk to
+  older routers must set it.
+- **Without `basic_auth` nothing is sent at startup any more:** authentication is not
+  enabled, so the health check is skipped and the proxy starts right away.
+
 ## 0.1.8 - 2026-09-19
 
 ### Added

@@ -13,8 +13,8 @@ use tracing_subscriber::{
     EnvFilter, Layer, Registry, layer::Context as LayerContext, prelude::*, registry::LookupSpan,
 };
 use ws2tcp_local_core::{
-    DEFAULT_BUFFER_SIZE, DEFAULT_LISTEN, DEFAULT_RULE_REFRESH_INTERVAL_SECS, GatewayCheckError,
-    ProxyMode, Settings, run_proxy_with_mode_updates,
+    AuthMode, DEFAULT_BUFFER_SIZE, DEFAULT_LISTEN, DEFAULT_RULE_REFRESH_INTERVAL_SECS,
+    GatewayCheckError, ProxyMode, Settings, run_proxy_with_mode_updates,
 };
 
 #[repr(C)]
@@ -57,7 +57,9 @@ impl From<anyhow::Error> for TaskError {
     fn from(err: anyhow::Error) -> Self {
         let kind = match err.downcast_ref::<GatewayCheckError>() {
             Some(GatewayCheckError::Unauthorized { .. }) => Ws2TcpErrorKind::AuthFailed,
-            Some(GatewayCheckError::Failed(_)) => Ws2TcpErrorKind::GatewayCheckFailed,
+            Some(GatewayCheckError::Failed(_) | GatewayCheckError::LoginFailed(_)) => {
+                Ws2TcpErrorKind::GatewayCheckFailed
+            }
             None => Ws2TcpErrorKind::Other,
         };
         Self {
@@ -105,6 +107,12 @@ struct FfiSettings {
     rule_refresh_interval_secs: Option<u64>,
     proxy_mode: Option<ProxyMode>,
     insecure: Option<bool>,
+    /// How to authenticate to the gateway, one method at a time: `"token"` (default) sends no
+    /// health check, logs in once for a short-lived access token and needs a gateway with token
+    /// authentication; `"basic"` (kept for compatibility, being phased out) is a health check,
+    /// then Basic Auth on every connection. Without `basic_auth` there is nothing to log in
+    /// with, and the gateway is used anonymously after a health check.
+    auth_mode: Option<AuthMode>,
     /// Extra headers for the gateway websocket handshake, e.g.
     /// `{"User-Agent": "ws2tcp-local-qt/0.3.1"}`. A default `User-Agent` of
     /// `ws2tcp-local-ffi/<version>` is sent unless overridden here.
@@ -394,6 +402,7 @@ fn parse_settings(json: &str) -> Result<Settings> {
         rule_refresh_interval: Duration::from_secs(rule_refresh_interval_secs),
         proxy_mode: settings.proxy_mode.unwrap_or(ProxyMode::Global),
         insecure: settings.insecure.unwrap_or(false),
+        auth_mode: settings.auth_mode.unwrap_or_default(),
         headers: Vec::new(),
     };
 
@@ -572,6 +581,18 @@ mod tests {
         assert_eq!(settings.buffer_size, DEFAULT_BUFFER_SIZE);
         assert_eq!(settings.proxy_mode, ProxyMode::Global);
         assert!(!settings.insecure);
+        assert_eq!(settings.auth_mode, AuthMode::Token);
+    }
+
+    #[test]
+    fn parses_the_auth_mode() {
+        let parse = |json: &str| parse_settings(json);
+
+        let settings = parse(r#"{"gateway":"ws://127.0.0.1:8000","auth_mode":"token"}"#).unwrap();
+        assert_eq!(settings.auth_mode, AuthMode::Token);
+        let settings = parse(r#"{"gateway":"ws://127.0.0.1:8000","auth_mode":"basic"}"#).unwrap();
+        assert_eq!(settings.auth_mode, AuthMode::Basic);
+        assert!(parse(r#"{"gateway":"ws://127.0.0.1:8000","auth_mode":"both"}"#).is_err());
     }
 
     #[test]
@@ -648,10 +669,12 @@ mod tests {
     }
 
     fn start(handle: *mut Ws2TcpHandle, gateway: &str, basic_auth: Option<&str>) -> i32 {
+        // The fake gateway only knows the health check, which is the basic mode.
         let mut config = serde_json::json!({
             "listen": "127.0.0.1:0",
             "gateway": gateway,
             "proxy_mode": "global",
+            "auth_mode": "basic",
         });
         if let Some(basic_auth) = basic_auth {
             config["basic_auth"] = basic_auth.into();
@@ -758,18 +781,24 @@ mod tests {
     }
 
     #[test]
-    fn missing_credentials_stop_the_proxy_with_auth_failed() {
+    fn without_credentials_the_proxy_starts_without_checking_the_gateway() {
+        // Authentication is not enabled on the client: nothing is sent at startup, so a gateway
+        // that would want credentials is not asked, and the proxy runs.
         let gateway = spawn_fake_gateway();
         let handle = ws2tcp_handle_new();
 
         assert_eq!(start(handle, &gateway, None), WS2TCP_OK);
-        let (kind, message) = wait_until_stopped(handle);
+        std::thread::sleep(Duration::from_millis(300));
 
-        assert_eq!(kind, Ws2TcpErrorKind::AuthFailed);
-        assert!(
-            message.contains("no credentials were configured"),
-            "{message}"
+        assert!(matches!(
+            unsafe { ws2tcp_status(handle) },
+            Ws2TcpStatus::Running
+        ));
+        assert_eq!(
+            unsafe { ws2tcp_last_error_kind(handle) },
+            Ws2TcpErrorKind::None
         );
+        assert_eq!(unsafe { ws2tcp_stop(handle) }, WS2TCP_OK);
         unsafe { ws2tcp_handle_free(handle) };
     }
 
@@ -777,11 +806,59 @@ mod tests {
     fn unreachable_gateway_stops_the_proxy_with_gateway_check_failed() {
         let handle = ws2tcp_handle_new();
 
-        assert_eq!(start(handle, "ws://127.0.0.1:1", None), WS2TCP_OK);
+        // Basic mode with credentials is the one that sends a health check.
+        assert_eq!(
+            start(handle, "ws://127.0.0.1:1", Some("alice:secret")),
+            WS2TCP_OK
+        );
         let (kind, message) = wait_until_stopped(handle);
 
         assert_eq!(kind, Ws2TcpErrorKind::GatewayCheckFailed);
         assert!(message.contains("health check failed"), "{message}");
+        unsafe { ws2tcp_handle_free(handle) };
+    }
+
+    #[test]
+    fn a_failed_token_login_is_a_gateway_check_failure_without_a_health_check() {
+        let handle = ws2tcp_handle_new();
+        let config = serde_json::json!({
+            "listen": "127.0.0.1:0",
+            "gateway": "ws://127.0.0.1:1",
+            "basic_auth": "alice:secret",
+            "proxy_mode": "global",
+            "auth_mode": "token",
+        });
+        let config = CString::new(config.to_string()).unwrap();
+
+        assert_eq!(unsafe { ws2tcp_start(handle, config.as_ptr()) }, WS2TCP_OK);
+        let (kind, message) = wait_until_stopped(handle);
+
+        assert_eq!(kind, Ws2TcpErrorKind::GatewayCheckFailed);
+        assert!(message.contains("token login failed"), "{message}");
+        assert!(!message.contains("health check failed"), "{message}");
+        unsafe { ws2tcp_handle_free(handle) };
+    }
+
+    #[test]
+    fn the_default_mode_without_credentials_goes_straight_to_the_proxy() {
+        let handle = ws2tcp_handle_new();
+        // The default mode is token, and there are no credentials: nothing to log in with, so
+        // nothing is sent at startup, not even to a gateway that cannot be reached.
+        let config = serde_json::json!({
+            "listen": "127.0.0.1:0",
+            "gateway": "ws://127.0.0.1:1",
+            "proxy_mode": "global",
+        });
+        let config = CString::new(config.to_string()).unwrap();
+
+        assert_eq!(unsafe { ws2tcp_start(handle, config.as_ptr()) }, WS2TCP_OK);
+        std::thread::sleep(Duration::from_millis(300));
+
+        assert!(matches!(
+            unsafe { ws2tcp_status(handle) },
+            Ws2TcpStatus::Running
+        ));
+        assert_eq!(unsafe { ws2tcp_stop(handle) }, WS2TCP_OK);
         unsafe { ws2tcp_handle_free(handle) };
     }
 
