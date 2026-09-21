@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.0 - 2026-09-21
+
+### Added
+
+- The `config_json` accepts `upstream_proxy`, the URL of a proxy server that every connection
+  to the gateway goes through: `http://`, `socks5h://` (the proxy resolves hostnames) or
+  `socks5://` (hostnames are resolved locally), optionally with `user:pass@` credentials.
+  Missing or blank means no proxy; an invalid URL makes `ws2tcp_start` fail. Errors name the
+  proxy but never show its credentials. Requires the matching `ws2tcp-local-core`.
+
 ## 0.2.0 - 2026-09-20
 
 ### Added
