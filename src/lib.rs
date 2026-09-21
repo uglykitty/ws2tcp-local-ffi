@@ -14,7 +14,7 @@ use tracing_subscriber::{
 };
 use ws2tcp_local_core::{
     AuthMode, DEFAULT_BUFFER_SIZE, DEFAULT_LISTEN, DEFAULT_RULE_REFRESH_INTERVAL_SECS,
-    GatewayCheckError, ProxyMode, Settings, run_proxy_with_mode_updates,
+    GatewayCheckError, ProxyMode, Settings, UpstreamProxy, run_proxy_with_mode_updates,
 };
 
 #[repr(C)]
@@ -113,6 +113,10 @@ struct FfiSettings {
     /// then Basic Auth on every connection. Without `basic_auth` there is nothing to log in
     /// with, and the gateway is used anonymously after a health check.
     auth_mode: Option<AuthMode>,
+    /// A proxy server that every connection to the gateway goes through: `http://`,
+    /// `socks5h://` (the proxy resolves hostnames) or `socks5://` (hostnames are resolved
+    /// locally), optionally with `user:pass@` credentials. Missing or blank: no proxy.
+    upstream_proxy: Option<String>,
     /// Extra headers for the gateway websocket handshake, e.g.
     /// `{"User-Agent": "ws2tcp-local-qt/0.3.1"}`. A default `User-Agent` of
     /// `ws2tcp-local-ffi/<version>` is sent unless overridden here.
@@ -403,6 +407,8 @@ fn parse_settings(json: &str) -> Result<Settings> {
         proxy_mode: settings.proxy_mode.unwrap_or(ProxyMode::Global),
         insecure: settings.insecure.unwrap_or(false),
         auth_mode: settings.auth_mode.unwrap_or_default(),
+        upstream_proxy: UpstreamProxy::parse_optional(settings.upstream_proxy.as_deref())
+            .context("invalid upstream_proxy")?,
         headers: Vec::new(),
     };
 
@@ -593,6 +599,27 @@ mod tests {
         let settings = parse(r#"{"gateway":"ws://127.0.0.1:8000","auth_mode":"basic"}"#).unwrap();
         assert_eq!(settings.auth_mode, AuthMode::Basic);
         assert!(parse(r#"{"gateway":"ws://127.0.0.1:8000","auth_mode":"both"}"#).is_err());
+    }
+
+    #[test]
+    fn parses_the_upstream_proxy() {
+        let parse = |json: &str| parse_settings(json);
+
+        let settings = parse(r#"{"gateway":"ws://127.0.0.1:8000"}"#).unwrap();
+        assert!(settings.upstream_proxy.is_none());
+        let settings = parse(r#"{"gateway":"ws://127.0.0.1:8000","upstream_proxy":""}"#).unwrap();
+        assert!(settings.upstream_proxy.is_none());
+        let settings = parse(
+            r#"{"gateway":"ws://127.0.0.1:8000","upstream_proxy":"socks5h://u:secret@127.0.0.1:1080"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            settings.upstream_proxy.unwrap().to_string(),
+            "socks5h://127.0.0.1:1080"
+        );
+        let err =
+            parse(r#"{"gateway":"ws://127.0.0.1:8000","upstream_proxy":"ftp://h:1"}"#).unwrap_err();
+        assert!(format!("{err:#}").contains("scheme must be"), "{err:#}");
     }
 
     #[test]
@@ -815,6 +842,54 @@ mod tests {
 
         assert_eq!(kind, Ws2TcpErrorKind::GatewayCheckFailed);
         assert!(message.contains("health check failed"), "{message}");
+        unsafe { ws2tcp_handle_free(handle) };
+    }
+
+    #[test]
+    fn the_gateway_is_reached_through_the_upstream_proxy_or_not_at_all() {
+        let handle = ws2tcp_handle_new();
+        // The gateway itself is reachable, so a failure can only come from the proxy that
+        // nothing listens on: the health check does not bypass it.
+        let gateway = spawn_fake_gateway();
+        let config = serde_json::json!({
+            "listen": "127.0.0.1:0",
+            "gateway": gateway,
+            "basic_auth": "alice:secret",
+            "proxy_mode": "global",
+            "auth_mode": "basic",
+            "upstream_proxy": "socks5h://user:hunter2@127.0.0.1:1",
+        });
+        let config = CString::new(config.to_string()).unwrap();
+
+        assert_eq!(unsafe { ws2tcp_start(handle, config.as_ptr()) }, WS2TCP_OK);
+        let (kind, message) = wait_until_stopped(handle);
+
+        assert_eq!(kind, Ws2TcpErrorKind::GatewayCheckFailed);
+        assert!(message.contains("socks5h://127.0.0.1:1"), "{message}");
+        assert!(!message.contains("hunter2"), "{message}");
+        unsafe { ws2tcp_handle_free(handle) };
+    }
+
+    #[test]
+    fn an_invalid_upstream_proxy_is_refused_at_start() {
+        let handle = ws2tcp_handle_new();
+        let config = CString::new(
+            serde_json::json!({
+                "gateway": "ws://127.0.0.1:8000",
+                "upstream_proxy": "ftp://127.0.0.1:21",
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            unsafe { ws2tcp_start(handle, config.as_ptr()) },
+            WS2TCP_ERROR_RUNTIME
+        );
+        let message = unsafe { CStr::from_ptr(ws2tcp_last_error(handle)) }
+            .to_string_lossy()
+            .into_owned();
+        assert!(message.contains("upstream_proxy"), "{message}");
         unsafe { ws2tcp_handle_free(handle) };
     }
 
