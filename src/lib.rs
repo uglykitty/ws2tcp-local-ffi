@@ -113,9 +113,10 @@ struct FfiSettings {
     /// then Basic Auth on every connection. Without `basic_auth` there is nothing to log in
     /// with, and the gateway is used anonymously after a health check.
     auth_mode: Option<AuthMode>,
-    /// A proxy server that every connection to the gateway goes through: `http://`,
-    /// `socks5h://` (the proxy resolves hostnames) or `socks5://` (hostnames are resolved
-    /// locally), optionally with `user:pass@` credentials. Missing or blank: no proxy.
+    /// A proxy server that all outgoing connections go through (to the gateway, direct
+    /// requests and rule list downloads): `http://`, `socks5h://` (the proxy resolves
+    /// hostnames) or `socks5://` (hostnames are resolved locally), optionally with
+    /// `user:pass@` credentials. Missing or blank: no proxy.
     upstream_proxy: Option<String>,
     /// Extra headers for the gateway websocket handshake, e.g.
     /// `{"User-Agent": "ws2tcp-local-qt/0.3.1"}`. A default `User-Agent` of
