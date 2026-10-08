@@ -107,6 +107,10 @@ struct FfiSettings {
     rule_refresh_interval_secs: Option<u64>,
     proxy_mode: Option<ProxyMode>,
     insecure: Option<bool>,
+    /// Open gateway tunnels over HTTP/3 (WebSocket over QUIC, RFC 9220), falling back to
+    /// HTTP/1.1 over TCP when the gateway or the network does not allow it. Only for `wss://`
+    /// gateways, and ignored with an upstream proxy, which cannot carry QUIC. Default: off.
+    http3: Option<bool>,
     /// How to authenticate to the gateway, one method at a time: `"token"` (default) sends no
     /// health check, logs in once for a short-lived access token and needs a gateway with token
     /// authentication; `"basic"` (kept for compatibility, being phased out) is a health check,
@@ -407,6 +411,7 @@ fn parse_settings(json: &str) -> Result<Settings> {
         rule_refresh_interval: Duration::from_secs(rule_refresh_interval_secs),
         proxy_mode: settings.proxy_mode.unwrap_or(ProxyMode::Global),
         insecure: settings.insecure.unwrap_or(false),
+        http3: settings.http3.unwrap_or(false),
         auth_mode: settings.auth_mode.unwrap_or_default(),
         upstream_proxy: UpstreamProxy::parse_optional(settings.upstream_proxy.as_deref())
             .context("invalid upstream_proxy")?,
@@ -600,6 +605,23 @@ mod tests {
         let settings = parse(r#"{"gateway":"ws://127.0.0.1:8000","auth_mode":"basic"}"#).unwrap();
         assert_eq!(settings.auth_mode, AuthMode::Basic);
         assert!(parse(r#"{"gateway":"ws://127.0.0.1:8000","auth_mode":"both"}"#).is_err());
+    }
+
+    #[test]
+    fn parses_http3() {
+        let parse = |json: &str| parse_settings(json);
+
+        assert!(
+            !parse(r#"{"gateway":"wss://127.0.0.1:8000"}"#)
+                .unwrap()
+                .http3
+        );
+        assert!(
+            parse(r#"{"gateway":"wss://127.0.0.1:8000","http3":true}"#)
+                .unwrap()
+                .http3
+        );
+        assert!(parse(r#"{"gateway":"wss://127.0.0.1:8000","http3":"yes"}"#).is_err());
     }
 
     #[test]

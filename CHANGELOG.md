@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- The `config_json` accepts `http3` (default `false`): gateway tunnels are opened as WebSocket
+  over HTTP/3 (RFC 9220), falling back to HTTP/1.1 over TCP when that fails. Only for `wss://`
+  gateways, and ignored with an `upstream_proxy`. The proxy logs show the transport each
+  tunnel took (`transport="quic"` or `"tcp"`). Requires `ws2tcp-local-core` 0.5.0.
+- SOCKS5 `UDP ASSOCIATE` on the `socks_listen` port, from `ws2tcp-local-core` 0.4.0.
+
 ## 0.3.1 - 2026-09-21
 
 ### Fixed
