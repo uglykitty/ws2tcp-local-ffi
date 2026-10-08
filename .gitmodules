@@ -1,0 +1,4 @@
+[submodule "ws2tcp-local-core"]
+	path = ws2tcp-local-core
+	url = https://github.com/uglykitty/ws2tcp-local-core.git
+	branch = main

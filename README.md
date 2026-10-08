@@ -7,7 +7,14 @@ proxy service in native applications such as the Qt GUI.
 
 ## Build
 
+`ws2tcp-local-core` is included as a git submodule. Clone with submodules, or
+initialize them in an existing checkout:
+
 ```bash
+git clone --recursive https://github.com/uglykitty/ws2tcp-local-ffi.git
+# or, in an existing checkout:
+git submodule update --init
+
 cargo build
 ```
 
