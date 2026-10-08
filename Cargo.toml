@@ -1,6 +1,6 @@
 [package]
 name = "ws2tcp-local-ffi"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2024"
 description = "C ABI adapter for ws2tcp-local."
 license = "MIT"
