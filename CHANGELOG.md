@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.0 - 2026-10-10
+
+### Changed
+
+- **The `config_json` takes the HTTP/3 mode in `http3`, and `http3_only` is gone.** `http3` is
+  `"off"` (default), `"on"` (HTTP/3 first, TCP as the fallback) or `"only"` (the former
+  `http3_only: true`: no fallback). `true` and `false` still work, as `"on"` and `"off"`. A
+  leftover `http3_only` is ignored, so a caller that sent `http3_only: true` must send
+  `http3: "only"` instead. Requires `ws2tcp-local-core` 0.9.0.
+
 ## 0.6.0 - 2026-10-10
 
 ### Added
