@@ -40,6 +40,11 @@ int ws2tcp_set_log_callback(Ws2TcpLogCallback callback, void *user_data,
 
 int ws2tcp_start(Ws2TcpHandle *handle, const char *config_json);
 int ws2tcp_set_proxy_mode(Ws2TcpHandle *handle, const char *proxy_mode);
+/* Change how tunnels use HTTP/3 while the proxy runs: "off", "on" (HTTP/3
+   first, TCP as the fallback) or "only". It applies to tunnels opened
+   afterwards. "on" and "only" fail when the gateway is not a wss:// URL or an
+   upstream proxy is set; ws2tcp_last_error says why. */
+int ws2tcp_set_http3_mode(Ws2TcpHandle *handle, const char *http3_mode);
 int ws2tcp_stop(Ws2TcpHandle *handle);
 Ws2TcpStatus ws2tcp_status(Ws2TcpHandle *handle);
 const char *ws2tcp_last_error(Ws2TcpHandle *handle);

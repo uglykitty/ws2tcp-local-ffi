@@ -14,7 +14,8 @@ use tracing_subscriber::{
 };
 use ws2tcp_local_core::{
     AuthMode, DEFAULT_BUFFER_SIZE, DEFAULT_LISTEN, DEFAULT_RULE_REFRESH_INTERVAL_SECS,
-    GatewayCheckError, ProxyMode, Settings, UpstreamProxy, run_proxy_with_mode_updates,
+    GatewayCheckError, Http3Mode, ProxyMode, Settings, UpstreamProxy, http3_unusable_for,
+    run_proxy_with_updates,
 };
 
 #[repr(C)]
@@ -91,6 +92,9 @@ struct State {
     task: Option<tokio::task::JoinHandle<Result<(), TaskError>>>,
     shutdown: Option<oneshot::Sender<()>>,
     mode_updates: Option<tokio::sync::mpsc::UnboundedSender<ProxyMode>>,
+    http3_updates: Option<tokio::sync::mpsc::UnboundedSender<Http3Mode>>,
+    /// Why HTTP/3 cannot be turned on for the running proxy, if it cannot.
+    http3_blocked: Option<&'static str>,
     last_error: CString,
     last_error_kind: Ws2TcpErrorKind,
 }
@@ -141,6 +145,8 @@ pub extern "C" fn ws2tcp_handle_new() -> *mut Ws2TcpHandle {
                 task: None,
                 shutdown: None,
                 mode_updates: None,
+                http3_updates: None,
+                http3_blocked: None,
                 last_error: empty_c_string(),
                 last_error_kind: Ws2TcpErrorKind::None,
             }),
@@ -252,6 +258,44 @@ pub unsafe extern "C" fn ws2tcp_set_proxy_mode(
     }
 }
 
+/// Change how tunnels use HTTP/3 while the proxy runs: "off", "on" (HTTP/3 first, TCP as the
+/// fallback) or "only". It applies to tunnels opened afterwards, and "on" and "only" are refused
+/// when the gateway is not a wss:// URL or an upstream proxy is set.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ws2tcp_set_http3_mode(
+    handle: *mut Ws2TcpHandle,
+    http3_mode: *const c_char,
+) -> i32 {
+    let handle = match unsafe { handle.as_mut() } {
+        Some(handle) => handle,
+        None => return WS2TCP_ERROR_NULL_HANDLE,
+    };
+    let result = required_c_str(http3_mode)
+        .and_then(|value| parse_http3_mode(&value))
+        .and_then(|mode| {
+            let state = lock_state(handle);
+            let sender = state
+                .http3_updates
+                .as_ref()
+                .context("proxy is not running")?;
+            if let Some(reason) = state.http3_blocked
+                && mode != Http3Mode::Off
+            {
+                bail!("HTTP/3 cannot be used because {reason}");
+            }
+            sender
+                .send(mode)
+                .context("HTTP/3 mode update channel is closed")
+        });
+    match result {
+        Ok(()) => WS2TCP_OK,
+        Err(err) => {
+            set_last_error(handle, err);
+            WS2TCP_ERROR_RUNTIME
+        }
+    }
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ws2tcp_status(handle: *mut Ws2TcpHandle) -> Ws2TcpStatus {
     let handle = match unsafe { handle.as_mut() } {
@@ -308,15 +352,18 @@ fn start_handle(handle: &mut Ws2TcpHandle, config_json: *const c_char) -> Result
         bail!("proxy is already running");
     }
 
+    let http3_blocked = http3_unusable_for(&settings.gateway, settings.upstream_proxy.is_some());
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let (mode_updates_tx, mode_updates_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (http3_updates_tx, http3_updates_rx) = tokio::sync::mpsc::unbounded_channel();
     let task = handle.runtime.spawn(async move {
-        let result = run_proxy_with_mode_updates(
+        let result = run_proxy_with_updates(
             settings,
             async {
                 let _ = shutdown_rx.await;
             },
             mode_updates_rx,
+            http3_updates_rx,
         )
         .await
         .map_err(TaskError::from);
@@ -329,6 +376,8 @@ fn start_handle(handle: &mut Ws2TcpHandle, config_json: *const c_char) -> Result
 
     state.shutdown = Some(shutdown_tx);
     state.mode_updates = Some(mode_updates_tx);
+    state.http3_updates = Some(http3_updates_tx);
+    state.http3_blocked = http3_blocked;
     state.task = Some(task);
     state.last_error = empty_c_string();
     state.last_error_kind = Ws2TcpErrorKind::None;
@@ -343,6 +392,7 @@ fn stop_handle(handle: &mut Ws2TcpHandle) -> Result<()> {
             let _ = shutdown.send(());
         }
         state.mode_updates = None;
+        state.http3_updates = None;
         state.task.take()
     };
 
@@ -366,6 +416,7 @@ fn reap_finished_task(handle: &Ws2TcpHandle, state: &mut State) {
     if let Some(task) = state.task.take() {
         state.shutdown = None;
         state.mode_updates = None;
+        state.http3_updates = None;
         match handle.runtime.block_on(task) {
             Ok(Ok(())) => {}
             Ok(Err(err)) => {
@@ -437,6 +488,15 @@ fn parse_settings(json: &str) -> Result<Settings> {
 fn parse_proxy_mode(value: &str) -> Result<ProxyMode> {
     serde_json::from_value(serde_json::Value::String(value.to_owned()))
         .context("proxy_mode must be global or auto")
+}
+
+fn parse_http3_mode(value: &str) -> Result<Http3Mode> {
+    match value {
+        "off" => Ok(Http3Mode::Off),
+        "on" => Ok(Http3Mode::Preferred),
+        "only" => Ok(Http3Mode::Only),
+        _ => bail!("http3 mode must be off, on or only"),
+    }
 }
 
 fn lock_state(handle: &Ws2TcpHandle) -> std::sync::MutexGuard<'_, State> {
@@ -829,6 +889,11 @@ mod tests {
             unsafe { ws2tcp_set_proxy_mode(handle, c"global".as_ptr()) },
             WS2TCP_OK
         );
+        // The test gateway is ws://, which HTTP/3 cannot use; turning it off is always fine.
+        assert_eq!(
+            unsafe { ws2tcp_set_http3_mode(handle, c"off".as_ptr()) },
+            WS2TCP_OK
+        );
         assert_eq!(unsafe { ws2tcp_stop(handle) }, WS2TCP_OK);
         assert!(matches!(
             unsafe { ws2tcp_status(handle) },
@@ -837,6 +902,11 @@ mod tests {
         assert_eq!(
             unsafe { ws2tcp_last_error_kind(handle) },
             Ws2TcpErrorKind::None
+        );
+        // Stopped: nothing to change.
+        assert_eq!(
+            unsafe { ws2tcp_set_http3_mode(handle, c"off".as_ptr()) },
+            WS2TCP_ERROR_RUNTIME
         );
 
         unsafe { ws2tcp_handle_free(handle) };
