@@ -111,14 +111,12 @@ struct FfiSettings {
     rule_refresh_interval_secs: Option<u64>,
     proxy_mode: Option<ProxyMode>,
     insecure: Option<bool>,
-    /// Open gateway tunnels over HTTP/3 (WebSocket over QUIC, RFC 9220), falling back to
-    /// HTTP/1.1 over TCP when the gateway or the network does not allow it. Only for `wss://`
-    /// gateways, and ignored with an upstream proxy, which cannot carry QUIC. Default: off.
-    http3: Option<bool>,
-    /// Like `http3`, but with no HTTP/1.1 fallback: when HTTP/3 does not work, tunnels fail.
-    /// `ws2tcp_start` refuses a `ws://` gateway or an `upstream_proxy` with it. Implies `http3`.
-    /// Default: off.
-    http3_only: Option<bool>,
+    /// How gateway tunnels use HTTP/3 (WebSocket over QUIC, RFC 9220): `"off"` (default), `"on"`
+    /// (HTTP/3 first, falling back to HTTP/1.1 over TCP; ignored for a `ws://` gateway or with an
+    /// upstream proxy, which cannot carry QUIC) or `"only"` (no fallback: when HTTP/3 does not
+    /// work, tunnels fail, and `ws2tcp_start` refuses a `ws://` gateway or an `upstream_proxy`).
+    /// `true` and `false` also work, as `"on"` and `"off"`.
+    http3: Option<Http3Mode>,
     /// How to authenticate to the gateway, one method at a time: `"token"` (default) sends no
     /// health check, logs in once for a short-lived access token and needs a gateway with token
     /// authentication; `"basic"` (kept for compatibility, being phased out) is a health check,
@@ -466,8 +464,7 @@ fn parse_settings(json: &str) -> Result<Settings> {
         rule_refresh_interval: Duration::from_secs(rule_refresh_interval_secs),
         proxy_mode: settings.proxy_mode.unwrap_or(ProxyMode::Global),
         insecure: settings.insecure.unwrap_or(false),
-        http3: settings.http3.unwrap_or(false),
-        http3_only: settings.http3_only.unwrap_or(false),
+        http3: settings.http3.unwrap_or_default(),
         auth_mode: settings.auth_mode.unwrap_or_default(),
         upstream_proxy: UpstreamProxy::parse_optional(settings.upstream_proxy.as_deref())
             .context("invalid upstream_proxy")?,
@@ -674,50 +671,37 @@ mod tests {
 
     #[test]
     fn parses_http3() {
-        let parse = |json: &str| parse_settings(json);
+        let parse = |json: &str| parse_settings(json).map(|settings| settings.http3);
 
-        assert!(
-            !parse(r#"{"gateway":"wss://127.0.0.1:8000"}"#)
-                .unwrap()
-                .http3
+        assert_eq!(
+            parse(r#"{"gateway":"wss://127.0.0.1:8000"}"#).unwrap(),
+            Http3Mode::Off
         );
-        assert!(
-            parse(r#"{"gateway":"wss://127.0.0.1:8000","http3":true}"#)
-                .unwrap()
-                .http3
-        );
+        for (value, mode) in [
+            (r#""off""#, Http3Mode::Off),
+            (r#""on""#, Http3Mode::Preferred),
+            (r#""only""#, Http3Mode::Only),
+            ("true", Http3Mode::Preferred),
+            ("false", Http3Mode::Off),
+        ] {
+            let json = format!(r#"{{"gateway":"wss://127.0.0.1:8000","http3":{value}}}"#);
+            assert_eq!(parse(&json).unwrap(), mode, "{json}");
+        }
         assert!(parse(r#"{"gateway":"wss://127.0.0.1:8000","http3":"yes"}"#).is_err());
-    }
-
-    #[test]
-    fn parses_http3_only() {
-        let parse = |json: &str| parse_settings(json);
-
-        assert!(
-            !parse(r#"{"gateway":"wss://127.0.0.1:8000"}"#)
-                .unwrap()
-                .http3_only
-        );
-        assert!(
-            parse(r#"{"gateway":"wss://127.0.0.1:8000","http3_only":true}"#)
-                .unwrap()
-                .http3_only
-        );
-        assert!(parse(r#"{"gateway":"wss://127.0.0.1:8000","http3_only":1}"#).is_err());
+        assert!(parse(r#"{"gateway":"wss://127.0.0.1:8000","http3":1}"#).is_err());
     }
 
     #[test]
     fn http3_only_with_a_ws_gateway_stops_the_start() {
         let handle = ws2tcp_handle_new();
-        let config = CString::new(
-            r#"{"gateway":"ws://127.0.0.1:1","listen":"127.0.0.1:0","http3_only":true}"#,
-        )
-        .unwrap();
+        let config =
+            CString::new(r#"{"gateway":"ws://127.0.0.1:1","listen":"127.0.0.1:0","http3":"only"}"#)
+                .unwrap();
         // The refusal comes from the proxy task, so the start itself succeeds and the handle
         // stops with an error.
         assert_eq!(unsafe { ws2tcp_start(handle, config.as_ptr()) }, 0);
         let (_, message) = wait_until_stopped(handle);
-        assert!(message.contains("--http3-only"), "{message}");
+        assert!(message.contains("HTTP/3 only"), "{message}");
         unsafe { ws2tcp_handle_free(handle) };
     }
 
