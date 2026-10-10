@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.0 - 2026-10-10
+
+### Added
+
+- The `config_json` accepts `http3_only` (default `false`): like `http3`, but with no HTTP/1.1
+  fallback. When HTTP/3 does not work, tunnels fail. A `ws://` gateway or an `upstream_proxy`
+  with it stops the proxy with an error. It implies `http3`. Requires `ws2tcp-local-core` 0.6.0.
+
 ## 0.4.1 - 2026-10-10
 
 ### Changed
