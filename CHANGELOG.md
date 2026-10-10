@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.0 - 2026-10-10
+
+### Added
+
+- **`ws2tcp_set_http3_mode(handle, mode)`** changes how tunnels use HTTP/3 while the proxy runs:
+  `"off"`, `"on"` (HTTP/3 first, TCP as the fallback) or `"only"` (the `http3_only` of the config
+  JSON). It applies to tunnels opened afterwards. `"on"` and `"only"` fail, with the reason in
+  `ws2tcp_last_error`, when the gateway is not a `wss://` URL or an `upstream_proxy` is set.
+  Requires `ws2tcp-local-core` 0.7.0.
+
 ## 0.5.0 - 2026-10-10
 
 ### Added
