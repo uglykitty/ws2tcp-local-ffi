@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.1 - 2026-10-10
+
+### Changed
+
+- Updated `ws2tcp-local-core` to 0.5.1.
+
 ## 0.4.0 - 2026-10-08
 
 ### Added
