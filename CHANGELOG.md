@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.0 - 2026-10-12
+
+### Added
+
+- **`gfwlist_urls` in the `config_json`** lists where the gfwlist is downloaded from, tried in
+  order. It replaces the built-in list: the built-in URLs are not tried after it. Missing, empty
+  or only blank entries: the built-in list. Requires `ws2tcp-local-core` 0.10.0.
+- **`ws2tcp_default_gfwlist_urls`** returns the built-in gfwlist URLs, one per line, as a static
+  string, for frontends to show.
+
 ## 0.7.0 - 2026-10-10
 
 ### Changed
