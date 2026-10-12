@@ -1,7 +1,7 @@
 use std::{
     ffi::{CStr, CString, c_char},
     path::PathBuf,
-    sync::{Mutex, Once},
+    sync::{Mutex, Once, OnceLock},
     time::Duration,
 };
 
@@ -13,9 +13,9 @@ use tracing_subscriber::{
     EnvFilter, Layer, Registry, layer::Context as LayerContext, prelude::*, registry::LookupSpan,
 };
 use ws2tcp_local_core::{
-    AuthMode, DEFAULT_BUFFER_SIZE, DEFAULT_LISTEN, DEFAULT_RULE_REFRESH_INTERVAL_SECS,
-    GatewayCheckError, Http3Mode, ProxyMode, Settings, UpstreamProxy, http3_unusable_for,
-    run_proxy_with_updates,
+    AuthMode, DEFAULT_BUFFER_SIZE, DEFAULT_GFWLIST_URLS, DEFAULT_LISTEN,
+    DEFAULT_RULE_REFRESH_INTERVAL_SECS, GatewayCheckError, Http3Mode, ProxyMode, Settings,
+    UpstreamProxy, http3_unusable_for, resolve_gfwlist_urls, run_proxy_with_updates,
 };
 
 #[repr(C)]
@@ -109,6 +109,10 @@ struct FfiSettings {
     log_level: Option<String>,
     custom_domain_rules: Option<PathBuf>,
     rule_refresh_interval_secs: Option<u64>,
+    /// Where to download the gfwlist from in auto proxy mode, tried in order until one works.
+    /// The list replaces the built-in one (`ws2tcp_default_gfwlist_urls`): the built-in URLs are
+    /// not tried after it. Missing, empty or only blank entries: the built-in list.
+    gfwlist_urls: Option<Vec<String>>,
     proxy_mode: Option<ProxyMode>,
     insecure: Option<bool>,
     /// How gateway tunnels use HTTP/3 (WebSocket over QUIC, RFC 9220): `"off"` (default), `"on"`
@@ -320,6 +324,15 @@ pub unsafe extern "C" fn ws2tcp_last_error(handle: *mut Ws2TcpHandle) -> *const 
     lock_state(handle).last_error.as_ptr()
 }
 
+/// The built-in gfwlist URLs, one per line, in the order they are tried. The string is static:
+/// it stays valid for the life of the process and must not be freed.
+#[unsafe(no_mangle)]
+pub extern "C" fn ws2tcp_default_gfwlist_urls() -> *const c_char {
+    static URLS: OnceLock<CString> = OnceLock::new();
+    URLS.get_or_init(|| c_string_lossy(DEFAULT_GFWLIST_URLS.join("\n")))
+        .as_ptr()
+}
+
 /// The kind of the error `ws2tcp_last_error` describes. The proxy starts asynchronously, so a
 /// failed startup check of the gateway shows up here once `ws2tcp_status` reports it stopped.
 #[unsafe(no_mangle)]
@@ -462,6 +475,7 @@ fn parse_settings(json: &str) -> Result<Settings> {
         log_level: settings.log_level,
         custom_domain_rules: settings.custom_domain_rules,
         rule_refresh_interval: Duration::from_secs(rule_refresh_interval_secs),
+        gfwlist_urls: resolve_gfwlist_urls(settings.gfwlist_urls)?,
         proxy_mode: settings.proxy_mode.unwrap_or(ProxyMode::Global),
         insecure: settings.insecure.unwrap_or(false),
         http3: settings.http3.unwrap_or_default(),
@@ -724,6 +738,39 @@ mod tests {
         let err =
             parse(r#"{"gateway":"ws://127.0.0.1:8000","upstream_proxy":"ftp://h:1"}"#).unwrap_err();
         assert!(format!("{err:#}").contains("scheme must be"), "{err:#}");
+    }
+
+    #[test]
+    fn parses_the_gfwlist_urls() {
+        let parse = |json: &str| parse_settings(json).map(|settings| settings.gfwlist_urls);
+
+        assert_eq!(
+            parse(r#"{"gateway":"ws://127.0.0.1:8000"}"#).unwrap(),
+            DEFAULT_GFWLIST_URLS
+        );
+        assert_eq!(
+            parse(r#"{"gateway":"ws://127.0.0.1:8000","gfwlist_urls":[" "]}"#).unwrap(),
+            DEFAULT_GFWLIST_URLS
+        );
+        assert_eq!(
+            parse(r#"{"gateway":"ws://127.0.0.1:8000","gfwlist_urls":["https://a.example/g"]}"#)
+                .unwrap(),
+            ["https://a.example/g"]
+        );
+        let err =
+            parse(r#"{"gateway":"ws://127.0.0.1:8000","gfwlist_urls":["ftp://a/g"]}"#).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("invalid gfwlist URL"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn default_gfwlist_urls_are_one_per_line() {
+        let urls = unsafe { CStr::from_ptr(ws2tcp_default_gfwlist_urls()) }
+            .to_str()
+            .unwrap();
+        assert_eq!(urls.lines().collect::<Vec<_>>(), DEFAULT_GFWLIST_URLS);
     }
 
     #[test]

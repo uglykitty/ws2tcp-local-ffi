@@ -52,6 +52,10 @@ const char *ws2tcp_last_error(Ws2TcpHandle *handle);
    before the gateway has been checked, so a failed check shows up here once
    ws2tcp_status reports the proxy as stopped. */
 Ws2TcpErrorKind ws2tcp_last_error_kind(Ws2TcpHandle *handle);
+/* The built-in gfwlist URLs, one per line, in the order they are tried. Used
+   when config_json has no "gfwlist_urls". The string is static: never free
+   it. */
+const char *ws2tcp_default_gfwlist_urls(void);
 
 #ifdef __cplusplus
 }
